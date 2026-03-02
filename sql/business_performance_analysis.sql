@@ -151,3 +151,147 @@ SELECT
 FROM customer_activity
 GROUP BY cohort_month, activity_month
 ORDER BY cohort_month, activity_month;
+
+/* ============================================================
+   COHORT RETENTION WITH RETENTION PERCENTAGE
+   ============================================================ */
+
+WITH first_purchase AS (
+    SELECT
+        CustomerID,
+        DATE_TRUNC('month', MIN(InvoiceDate)) AS cohort_month
+    FROM retail_transactions
+    GROUP BY CustomerID
+),
+
+customer_activity AS (
+    SELECT
+        r.CustomerID,
+        DATE_TRUNC('month', r.InvoiceDate) AS activity_month,
+        f.cohort_month
+    FROM retail_transactions r
+    JOIN first_purchase f
+        ON r.CustomerID = f.CustomerID
+),
+
+cohort_size AS (
+    SELECT
+        cohort_month,
+        COUNT(DISTINCT CustomerID) AS cohort_customers
+    FROM first_purchase
+    GROUP BY cohort_month
+),
+
+retention_table AS (
+    SELECT
+        cohort_month,
+        activity_month,
+        COUNT(DISTINCT CustomerID) AS active_customers
+    FROM customer_activity
+    GROUP BY cohort_month, activity_month
+)
+
+SELECT
+    r.cohort_month,
+    r.activity_month,
+    r.active_customers,
+    c.cohort_customers,
+    ROUND(
+        r.active_customers * 100.0 / c.cohort_customers,
+        2
+    ) AS retention_pct
+FROM retention_table r
+JOIN cohort_size c
+    ON r.cohort_month = c.cohort_month
+ORDER BY r.cohort_month, r.activity_month;
+
+/* ============================================================
+   CUSTOMER CHURN ANALYSIS
+   Definition: No purchase in last 90 days of dataset
+   ============================================================ */
+
+WITH last_purchase AS (
+    SELECT
+        CustomerID,
+        MAX(InvoiceDate) AS last_purchase_date
+    FROM retail_transactions
+    GROUP BY CustomerID
+),
+
+dataset_max_date AS (
+    SELECT MAX(InvoiceDate) AS max_date
+    FROM retail_transactions
+)
+
+SELECT
+    COUNT(*) AS total_customers,
+    SUM(
+        CASE 
+            WHEN last_purchase_date < max_date - INTERVAL '90 days'
+            THEN 1 ELSE 0
+        END
+    ) AS churned_customers,
+    ROUND(
+        SUM(
+            CASE 
+                WHEN last_purchase_date < max_date - INTERVAL '90 days'
+                THEN 1 ELSE 0
+            END
+        ) * 100.0 / COUNT(*),
+        2
+    ) AS churn_rate_pct
+FROM last_purchase, dataset_max_date;
+
+/* ============================================================
+   RFM ANALYSIS
+   ============================================================ */
+
+WITH customer_metrics AS (
+    SELECT
+        CustomerID,
+        MAX(InvoiceDate) AS last_purchase_date,
+        COUNT(DISTINCT InvoiceNo) AS frequency,
+        SUM(Revenue) AS monetary
+    FROM retail_transactions
+    GROUP BY CustomerID
+),
+
+dataset_max_date AS (
+    SELECT MAX(InvoiceDate) AS max_date
+    FROM retail_transactions
+),
+
+rfm_base AS (
+    SELECT
+        c.CustomerID,
+        EXTRACT(DAY FROM (d.max_date - c.last_purchase_date)) AS recency_days,
+        c.frequency,
+        c.monetary
+    FROM customer_metrics c
+    CROSS JOIN dataset_max_date d
+),
+
+rfm_scores AS (
+    SELECT
+        CustomerID,
+        recency_days,
+        frequency,
+        monetary,
+        NTILE(5) OVER (ORDER BY recency_days DESC) AS r_score,
+        NTILE(5) OVER (ORDER BY frequency ASC) AS f_score,
+        NTILE(5) OVER (ORDER BY monetary ASC) AS m_score
+    FROM rfm_base
+)
+
+SELECT
+    CustomerID,
+    recency_days,
+    frequency,
+    monetary,
+    r_score,
+    f_score,
+    m_score,
+    (r_score + f_score + m_score) AS rfm_total_score
+FROM rfm_scores
+ORDER BY rfm_total_score DESC
+LIMIT 50;
